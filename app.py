@@ -72,8 +72,7 @@ with st.sidebar:
     tol_h_pos = st.number_input("Altura banco: Tol. (+) m", value=1.5, step=0.5, key="tol_h_pos")
     tol_a_neg = st.number_input("Ángulo cara: Tol. (-) °", value=5.0, step=1.0, key="tol_a_neg")
     tol_a_pos = st.number_input("Ángulo cara: Tol. (+) °", value=5.0, step=1.0, key="tol_a_pos")
-    tol_b_neg = st.number_input("Berma: Tol. (-) m", value=1.0, step=0.5, key="tol_b_neg")
-    tol_b_pos = st.number_input("Berma: Tol. (+) m", value=2.0, step=0.5, key="tol_b_pos")
+    min_berm_width = st.number_input("Berma mínima (m)", value=6.0, step=0.5, key="min_berm")
     tol_ir_neg = st.number_input("Áng. Inter-Rampa: Tol. (-) °", value=3.0, step=1.0, key="tol_ir_neg")
     tol_ir_pos = st.number_input("Áng. Inter-Rampa: Tol. (+) °", value=2.0, step=1.0, key="tol_ir_pos")
 
@@ -91,7 +90,7 @@ with st.sidebar:
 tolerances = {
     'bench_height': {'neg': tol_h_neg, 'pos': tol_h_pos},
     'face_angle': {'neg': tol_a_neg, 'pos': tol_a_pos},
-    'berm_width': {'neg': tol_b_neg, 'pos': tol_b_pos},
+    'berm_width': {'min': min_berm_width},
     'inter_ramp_angle': {'neg': tol_ir_neg, 'pos': tol_ir_pos},
     'overall_angle': {'neg': 2.0, 'pos': 2.0},
 }
@@ -177,8 +176,8 @@ if st.session_state.mesh_design is not None and st.session_state.mesh_topo is no
             md = decimate_mesh(st.session_state.mesh_design, 30000)
             mt = decimate_mesh(st.session_state.mesh_topo, 30000)
 
-            fig.add_trace(mesh_to_plotly(md, "Diseño", "royalblue", 0.5))
-            fig.add_trace(mesh_to_plotly(mt, "Topografía Real", "forestgreen", 0.5))
+            fig.add_trace(mesh_to_plotly(md, "Diseño", "royalblue", 1.0))
+            fig.add_trace(mesh_to_plotly(mt, "Topografía Real", "forestgreen", 1.0))
 
             # Draw sections if they exist
             if st.session_state.sections:
@@ -769,7 +768,7 @@ if st.session_state.step >= 4 and st.session_state.comparison_results:
                 'angle_design': 'Á. Diseño', 'angle_real': 'Á. Real',
                 'angle_dev': 'Desv. Á', 'angle_status': 'Cumpl. Á',
                 'berm_design': 'B. Diseño', 'berm_real': 'B. Real',
-                'berm_dev': 'Desv. B', 'berm_status': 'Cumpl. B',
+                'berm_min': 'B. Mínima', 'berm_status': 'Cumpl. B',
             }
             df_display = df.rename(columns=display_cols)
 
@@ -818,7 +817,7 @@ if st.session_state.step >= 4 and st.session_state.comparison_results:
             height=350, margin=dict(l=40, r=20, t=40, b=40))
         st.plotly_chart(fig_bar, use_container_width=True)
 
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
             devs_h = [r['height_dev'] for r in results]
             fig_h = go.Figure(go.Histogram(x=devs_h, nbinsx=15, marker_color='royalblue'))
@@ -835,6 +834,15 @@ if st.session_state.step >= 4 and st.session_state.comparison_results:
             fig_a.add_vline(x=-tol_a_neg, line_dash="dash", line_color="orange")
             fig_a.add_vline(x=tol_a_pos, line_dash="dash", line_color="orange")
             st.plotly_chart(fig_a, use_container_width=True)
+        with col3:
+            berm_vals = [r['berm_real'] for r in results if r['berm_real'] > 0]
+            if berm_vals:
+                fig_b = go.Figure(go.Histogram(x=berm_vals, nbinsx=15, marker_color='#FF7F0E'))
+                fig_b.update_layout(title="Distribución Ancho Berma (m)", height=300,
+                    xaxis_title="Ancho (m)", yaxis_title="Frecuencia")
+                fig_b.add_vline(x=min_berm_width, line_dash="dash", line_color="red",
+                    annotation_text="Mínimo", annotation_position="top right")
+                st.plotly_chart(fig_b, use_container_width=True)
 
     # --- EXPORTAR ---
     with tab_export:

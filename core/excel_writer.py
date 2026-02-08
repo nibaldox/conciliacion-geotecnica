@@ -95,16 +95,22 @@ def _write_summary_sheet(wb, comparisons, tolerances, project_info):
     tol_display = [
         ("Altura de banco (m)", 'bench_height'),
         ("Angulo cara (deg)", 'face_angle'),
-        ("Ancho de berma (m)", 'berm_width'),
         ("Angulo inter-rampa (deg)", 'inter_ramp_angle'),
         ("Angulo global (deg)", 'overall_angle'),
     ]
     for label, key in tol_display:
         tol = tolerances.get(key, {'neg': 0, 'pos': 0})
         ws.cell(row=row, column=1, value=label).border = THIN_BORDER
-        ws.cell(row=row, column=2, value=tol['neg']).border = THIN_BORDER
-        ws.cell(row=row, column=3, value=tol['pos']).border = THIN_BORDER
+        ws.cell(row=row, column=2, value=tol.get('neg', 0)).border = THIN_BORDER
+        ws.cell(row=row, column=3, value=tol.get('pos', 0)).border = THIN_BORDER
         row += 1
+    # Berm minimum
+    berm_tol = tolerances.get('berm_width', {})
+    ws.cell(row=row, column=1, value="Berma minima (m)").border = THIN_BORDER
+    ws.cell(row=row, column=2,
+            value=berm_tol.get('min', 0)).border = THIN_BORDER
+    ws.cell(row=row, column=3, value="").border = THIN_BORDER
+    row += 1
 
     row += 1
 
@@ -155,7 +161,7 @@ def _write_bench_sheet(wb, comparisons):
         "Sector", "Seccion", "Banco", "Nivel",
         "H. Diseno (m)", "H. Real (m)", "Desv. H (m)", "Cumpl. H",
         "A. Diseno (deg)", "A. Real (deg)", "Desv. A (deg)", "Cumpl. A",
-        "B. Diseno (m)", "B. Real (m)", "Desv. B (m)", "Cumpl. B",
+        "B. Diseno (m)", "B. Real (m)", "B. Minima (m)", "Cumpl. B",
     ]
     _write_header(ws, 1, headers)
 
@@ -167,7 +173,7 @@ def _write_bench_sheet(wb, comparisons):
             comp['angle_design'], comp['angle_real'],
             comp['angle_dev'], comp['angle_status'],
             comp['berm_design'], comp['berm_real'],
-            comp['berm_dev'], comp['berm_status'],
+            comp.get('berm_min', 0), comp['berm_status'],
         ]
         for col_idx, val in enumerate(values, 1):
             cell = ws.cell(row=row_idx, column=col_idx, value=val)
