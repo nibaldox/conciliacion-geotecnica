@@ -34,13 +34,10 @@ def decimate_mesh(mesh, target_faces):
     try:
         return mesh.simplify_quadric_decimation(target_faces)
     except (ImportError, Exception):
-        # Fallback: uniform vertex subsampling if fast_simplification unavailable
-        step = max(1, len(mesh.vertices) // target_faces)
-        indices = np.arange(0, len(mesh.vertices), step)
-        mask = np.isin(mesh.faces, indices).all(axis=1)
-        if mask.sum() > 0:
-            return mesh.submesh([np.where(mask)[0]], append=True)
-        return mesh
+        # Fallback: uniform face subsampling
+        step = max(1, len(mesh.faces) // target_faces)
+        face_indices = np.arange(0, len(mesh.faces), step)[:target_faces]
+        return mesh.submesh([face_indices], append=True)
 
 
 def mesh_to_plotly(mesh, name, color, opacity):
