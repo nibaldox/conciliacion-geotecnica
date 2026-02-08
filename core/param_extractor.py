@@ -207,6 +207,23 @@ def _evaluate_status(deviation, tol_neg, tol_pos):
         return "NO CUMPLE"
 
 
+def build_reconciled_profile(benches):
+    """
+    Build an idealized profile from detected crest/toe points.
+    Returns distances and elevations arrays connecting crest→toe→crest→toe.
+    """
+    if not benches:
+        return np.array([]), np.array([])
+    distances = []
+    elevations = []
+    for bench in benches:
+        distances.append(bench.crest_distance)
+        elevations.append(bench.crest_elevation)
+        distances.append(bench.toe_distance)
+        elevations.append(bench.toe_elevation)
+    return np.array(distances), np.array(elevations)
+
+
 def compare_design_vs_asbuilt(params_design, params_topo, tolerances):
     """
     Compare design vs as-built parameters bench by bench.
@@ -221,11 +238,22 @@ def compare_design_vs_asbuilt(params_design, params_topo, tolerances):
 
         height_dev = bt.bench_height - bd.bench_height
         angle_dev = bt.face_angle - bd.face_angle
-        berm_dev = bt.berm_width - bd.berm_width
 
         tol_h = tolerances['bench_height']
         tol_a = tolerances['face_angle']
         tol_b = tolerances['berm_width']
+
+        # Berm: evaluate against minimum width
+        min_berm = tol_b.get('min', 0.0)
+        if bt.berm_width == 0.0 and bd.berm_width == 0.0:
+            # Last bench in group - no berm to evaluate
+            berm_status = "CUMPLE"
+        elif bt.berm_width >= min_berm:
+            berm_status = "CUMPLE"
+        elif bt.berm_width >= min_berm * 0.8:
+            berm_status = "FUERA DE TOLERANCIA"
+        else:
+            berm_status = "NO CUMPLE"
 
         comparisons.append({
             'sector': params_design.sector,
@@ -244,9 +272,8 @@ def compare_design_vs_asbuilt(params_design, params_topo, tolerances):
                                              tol_a['pos']),
             'berm_design': round(bd.berm_width, 2),
             'berm_real': round(bt.berm_width, 2),
-            'berm_dev': round(berm_dev, 2),
-            'berm_status': _evaluate_status(berm_dev, tol_b['neg'],
-                                            tol_b['pos']),
+            'berm_min': min_berm,
+            'berm_status': berm_status,
         })
 
     return comparisons

@@ -137,7 +137,7 @@ def run_test():
     tolerances = {
         'bench_height': {'neg': 1.0, 'pos': 1.5},
         'face_angle': {'neg': 5.0, 'pos': 5.0},
-        'berm_width': {'neg': 1.0, 'pos': 2.0},
+        'berm_width': {'min': 6.0},
         'inter_ramp_angle': {'neg': 3.0, 'pos': 2.0},
         'overall_angle': {'neg': 2.0, 'pos': 2.0},
     }
@@ -188,7 +188,7 @@ def run_test():
             print(f"   {c['section']}-B{c['bench_num']}: "
                   f"H={c['height_dev']:+.2f}m [{c['height_status']}] | "
                   f"Á={c['angle_dev']:+.1f}° [{c['angle_status']}] | "
-                  f"B={c['berm_dev']:+.2f}m [{c['berm_status']}]")
+                  f"B={c['berm_real']:.1f}m (min={c['berm_min']:.0f}m) [{c['berm_status']}]")
         
         # Exportar
         output = "/tmp/test_conciliacion.xlsx"
