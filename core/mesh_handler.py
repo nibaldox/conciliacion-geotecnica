@@ -31,7 +31,16 @@ def decimate_mesh(mesh, target_faces):
     """Reduce mesh face count for visualization performance."""
     if len(mesh.faces) <= target_faces:
         return mesh
-    return mesh.simplify_quadric_decimation(target_faces)
+    try:
+        return mesh.simplify_quadric_decimation(target_faces)
+    except (ImportError, Exception):
+        # Fallback: uniform vertex subsampling if fast_simplification unavailable
+        step = max(1, len(mesh.vertices) // target_faces)
+        indices = np.arange(0, len(mesh.vertices), step)
+        mask = np.isin(mesh.faces, indices).all(axis=1)
+        if mask.sum() > 0:
+            return mesh.submesh([np.where(mask)[0]], append=True)
+        return mesh
 
 
 def mesh_to_plotly(mesh, name, color, opacity):
