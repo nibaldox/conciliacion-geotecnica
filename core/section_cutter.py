@@ -145,3 +145,67 @@ def generate_sections_along_crest(mesh, start_point, end_point, n_sections,
             sector=sector_name,
         ))
     return sections
+
+
+def generate_perpendicular_sections(points, spacing, section_length,
+                                    sector_name="", auto_azimuth_mesh=None):
+    """
+    Generate sections perpendicular to a polyline at specified spacing.
+
+    Parameters:
+        points: Nx2 array of (X, Y) coordinates defining the evaluation line
+        spacing: Distance between sections in meters
+        section_length: Length of each section in meters
+        sector_name: Sector name for labeling
+        auto_azimuth_mesh: If provided, compute azimuth from mesh slope
+                           instead of line perpendicular
+    Returns:
+        List of SectionLine objects
+    """
+    points = np.atleast_2d(points)
+    if len(points) < 2:
+        return []
+
+    # Cumulative distance along polyline
+    diffs = np.diff(points, axis=0)
+    seg_lengths = np.sqrt((diffs ** 2).sum(axis=1))
+    cum_dist = np.concatenate([[0], np.cumsum(seg_lengths)])
+    total_length = cum_dist[-1]
+
+    if total_length < 1e-6:
+        return []
+
+    # Section positions along the polyline
+    if total_length < spacing:
+        section_dists = [total_length / 2]
+    else:
+        section_dists = np.arange(spacing / 2, total_length, spacing)
+
+    sections = []
+    for i, d in enumerate(section_dists):
+        # Find which segment we're on
+        seg_idx = int(np.searchsorted(cum_dist, d, side='right')) - 1
+        seg_idx = max(0, min(seg_idx, len(points) - 2))
+
+        # Interpolate position
+        t = ((d - cum_dist[seg_idx]) / seg_lengths[seg_idx]
+             if seg_lengths[seg_idx] > 0 else 0)
+        origin = points[seg_idx] + t * diffs[seg_idx]
+
+        if auto_azimuth_mesh is not None:
+            az = compute_local_azimuth(auto_azimuth_mesh, origin)
+        else:
+            # Perpendicular to the polyline tangent
+            tangent = diffs[seg_idx]
+            tangent_az = np.degrees(np.arctan2(tangent[0], tangent[1])) % 360
+            az = (tangent_az + 90) % 360
+
+        sections.append(SectionLine(
+            name=f"S-{i + 1:02d}",
+            origin=origin,
+            azimuth=az,
+            length=section_length,
+            sector=sector_name,
+        ))
+
+    return sections

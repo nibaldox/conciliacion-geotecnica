@@ -207,6 +207,23 @@ def _evaluate_status(deviation, tol_neg, tol_pos):
         return "NO CUMPLE"
 
 
+def build_reconciled_profile(benches):
+    """
+    Build an idealized profile from detected crest/toe points.
+    Returns distances and elevations arrays connecting crest→toe→crest→toe.
+    """
+    if not benches:
+        return np.array([]), np.array([])
+    distances = []
+    elevations = []
+    for bench in benches:
+        distances.append(bench.crest_distance)
+        elevations.append(bench.crest_elevation)
+        distances.append(bench.toe_distance)
+        elevations.append(bench.toe_elevation)
+    return np.array(distances), np.array(elevations)
+
+
 def compare_design_vs_asbuilt(params_design, params_topo, tolerances):
     """
     Compare design vs as-built parameters bench by bench.
