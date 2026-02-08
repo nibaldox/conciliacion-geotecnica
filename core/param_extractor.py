@@ -32,15 +32,16 @@ class ExtractionResult:
 
 def extract_parameters(distances, elevations, section_name, sector,
                        resolution=0.5, face_threshold=40.0,
-                       berm_threshold=20.0):
+                       berm_threshold=20.0, max_berm_width=50.0):
     """
     Extract geotechnical parameters from a 2D profile.
 
-    1. Resample and lightly smooth profile for segment classification
-    2. Compute local angles between consecutive points
-    3. Classify segments as face (>face_threshold) or berm (<berm_threshold)
-    4. Find true crest/toe from RAW profile around face boundaries
-    5. Calculate inter-ramp and overall angles
+    1. Resample and smooth profile for segment classification
+    2. Compute local angles, classify as face or berm
+    3. Merge nearby face segments (avoid fragmentation)
+    4. Face angle = 75th percentile of local angles in face segment
+    5. True crest/toe from RAW profile around face boundaries
+    6. Berm width = distance from toe of bench i to crest of bench i+1
     """
     result = ExtractionResult(section_name=section_name, sector=sector)
 
@@ -59,95 +60,112 @@ def extract_parameters(distances, elevations, section_name, sector,
                         bounds_error=False, fill_value='extrapolate')
     e_resampled = f_interp(d_resampled)
 
-    # Moderate smooth for robust segment classification (2m window)
+    # Moderate smooth for segment classification (2m window)
     window = max(3, int(2.0 / resolution))
     if window % 2 == 0:
         window += 1
     e_smooth = uniform_filter1d(e_resampled, size=window)
 
-    # Compute local angles from smoothed profile (robust classification)
+    # Compute local angles from smoothed profile
     dd = np.diff(d_resampled)
     de = np.diff(e_smooth)
     angles = np.abs(np.degrees(np.arctan2(np.abs(de), dd)))
 
-    # Classify segments
     is_face = angles > face_threshold
-    is_berm = angles < berm_threshold
 
-    # Search window for true crest/toe from RAW profile (2m)
-    search_pts = max(2, int(2.0 / resolution))
-
-    # Detect benches: face segments followed by berm segments
-    benches = []
-    bench_num = 0
+    # --- Step 1: Detect face segments ---
+    face_segments = []
     i = 0
     n = len(angles)
-
     while i < n:
         if is_face[i]:
-            face_start = i
+            start = i
             while i < n and is_face[i]:
                 i += 1
-            face_end = i
-
-            # Find TRUE crest from RAW profile: highest point before/at face_start
-            search_begin = max(0, face_start - search_pts)
-            crest_zone = e_resampled[search_begin:face_start + 1]
-            if len(crest_zone) > 0:
-                crest_idx = search_begin + int(np.argmax(crest_zone))
-            else:
-                crest_idx = face_start
-
-            # Find TRUE toe from RAW profile: lowest point at/after face_end
-            toe_limit = min(len(e_resampled), face_end + search_pts)
-            toe_zone = e_resampled[face_end - 1:toe_limit]
-            if len(toe_zone) > 0:
-                toe_idx = (face_end - 1) + int(np.argmin(toe_zone))
-            else:
-                toe_idx = min(face_end, len(d_resampled) - 1)
-
-            crest_d = d_resampled[crest_idx]
-            crest_e = e_resampled[crest_idx]
-            toe_d = d_resampled[toe_idx]
-            toe_e = e_resampled[toe_idx]
-
-            bench_height = abs(crest_e - toe_e)
-            horiz_dist = abs(toe_d - crest_d)
-
-            if bench_height < 2.0:
-                continue
-
-            if horiz_dist > 0:
-                face_angle = np.degrees(np.arctan2(bench_height, horiz_dist))
-            else:
-                face_angle = 90.0
-
-            # Find berm width after the toe
-            berm_width = 0.0
-            if i < n:
-                berm_start = i
-                while i < n and is_berm[i]:
-                    i += 1
-                berm_end = i
-                if berm_end > berm_start:
-                    berm_width = abs(
-                        d_resampled[min(berm_end, len(d_resampled) - 1)] -
-                        d_resampled[berm_start]
-                    )
-
-            bench_num += 1
-            benches.append(BenchParams(
-                bench_number=bench_num,
-                crest_elevation=float(crest_e),
-                crest_distance=float(crest_d),
-                toe_elevation=float(toe_e),
-                toe_distance=float(toe_d),
-                bench_height=float(bench_height),
-                face_angle=float(face_angle),
-                berm_width=float(berm_width),
-            ))
+            face_segments.append([start, i])
         else:
             i += 1
+
+    # --- Step 2: Merge face segments separated by small gaps (<3m) ---
+    merge_gap = max(2, int(3.0 / resolution))
+    merged = []
+    for seg in face_segments:
+        if merged and (seg[0] - merged[-1][1]) < merge_gap:
+            merged[-1][1] = seg[1]
+        else:
+            merged.append(list(seg))
+
+    # --- Step 3: Extract bench params from each face segment ---
+    search_pts = max(2, int(2.0 / resolution))
+    benches = []
+    bench_num = 0
+
+    for face_start, face_end in merged:
+        # Face angle: 75th percentile of local angles (ignores boundary effects)
+        face_angles_local = angles[face_start:face_end]
+        if len(face_angles_local) == 0:
+            continue
+        face_angle = float(np.percentile(face_angles_local, 75))
+
+        # True crest from RAW profile: highest point before/at face_start
+        search_begin = max(0, face_start - search_pts)
+        crest_zone = e_resampled[search_begin:face_start + 1]
+        if len(crest_zone) > 0:
+            crest_idx = search_begin + int(np.argmax(crest_zone))
+        else:
+            crest_idx = face_start
+
+        # True toe from RAW profile: lowest point at/after face_end
+        toe_limit = min(len(e_resampled), face_end + search_pts)
+        toe_zone = e_resampled[face_end - 1:toe_limit]
+        if len(toe_zone) > 0:
+            toe_idx = (face_end - 1) + int(np.argmin(toe_zone))
+        else:
+            toe_idx = min(face_end, len(d_resampled) - 1)
+
+        crest_e = e_resampled[crest_idx]
+        crest_d = d_resampled[crest_idx]
+        toe_e = e_resampled[toe_idx]
+        toe_d = d_resampled[toe_idx]
+
+        bench_height = abs(crest_e - toe_e)
+
+        if bench_height < 2.0:
+            continue
+
+        bench_num += 1
+        benches.append(BenchParams(
+            bench_number=bench_num,
+            crest_elevation=float(crest_e),
+            crest_distance=float(crest_d),
+            toe_elevation=float(toe_e),
+            toe_distance=float(toe_d),
+            bench_height=float(bench_height),
+            face_angle=float(face_angle),
+            berm_width=0.0,
+        ))
+
+    # --- Step 4: Berm width = toe of bench i to crest of bench i+1 ---
+    for j in range(len(benches) - 1):
+        bw = float(abs(benches[j + 1].crest_distance - benches[j].toe_distance))
+        benches[j].berm_width = bw
+
+    # --- Step 5: Filter out benches with unrealistic berm widths ---
+    # Large berm widths indicate pit bottom / ramp zones, not real berms.
+    # Split into groups of consecutive benches separated by wide gaps.
+    if max_berm_width and max_berm_width > 0 and len(benches) > 1:
+        groups = [[benches[0]]]
+        for j in range(len(benches) - 1):
+            if benches[j].berm_width > max_berm_width:
+                benches[j].berm_width = 0.0  # last bench in group
+                groups.append([benches[j + 1]])
+            else:
+                groups[-1].append(benches[j + 1])
+        # Keep only the largest group (most benches)
+        benches = max(groups, key=len)
+        # Re-number
+        for idx, b in enumerate(benches):
+            b.bench_number = idx + 1
 
     result.benches = benches
 
