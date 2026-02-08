@@ -53,6 +53,7 @@ defaults = {
     'sections': [], 'profiles_design': [], 'profiles_topo': [],
     'params_design': [], 'params_topo': [],
     'comparison_results': [], 'step': 1,
+    'clicked_sections': [],
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -132,7 +133,7 @@ if file_design and file_topo:
             st.success(f"✅ Topografía cargada: {bt['n_faces']:,} caras, {bt['n_vertices']:,} vértices")
             st.caption(f"X: [{bt['xmin']:.1f}, {bt['xmax']:.1f}] | Y: [{bt['ymin']:.1f}, {bt['ymax']:.1f}] | Z: [{bt['zmin']:.1f}, {bt['zmax']:.1f}]")
         
-        st.session_state.step = 2
+        st.session_state.step = max(st.session_state.step, 2)
     except Exception as e:
         st.error(f"Error al cargar: {e}")
 
@@ -180,29 +181,151 @@ if st.session_state.mesh_design is not None and st.session_state.mesh_topo is no
 if st.session_state.step >= 2:
     st.header("✂️ Paso 2: Definir Secciones de Corte")
     
-    tab_manual, tab_auto = st.tabs(["📌 Definición Manual", "🔄 Generación Automática"])
-    
+    tab_interactive, tab_manual, tab_auto = st.tabs([
+        "🗺️ Interactivo (Clic)", "📌 Manual", "🔄 Automático"])
+
+    # --- TAB INTERACTIVO ---
+    with tab_interactive:
+        st.markdown("Haz clic sobre la vista de planta para colocar el origen de cada sección. "
+                    "El azimut se calcula automáticamente según la pendiente local del diseño.")
+
+        from core.section_cutter import azimuth_to_direction as _az2dir, compute_local_azimuth
+
+        cols_cfg = st.columns(3)
+        sec_length_int = cols_cfg[0].number_input(
+            "Longitud de sección (m)", value=200.0, min_value=10.0, key="len_int")
+        sector_int = cols_cfg[1].text_input("Sector", "Principal", key="sector_int")
+        az_mode = cols_cfg[2].selectbox(
+            "Azimut", ["Auto (pendiente local)", "Manual"], key="az_mode_int")
+        if az_mode == "Manual":
+            manual_az_int = st.number_input(
+                "Azimut manual (°)", 0.0, 360.0, 0.0, key="man_az_int")
+
+        # Build plan view
+        mesh_d = st.session_state.mesh_design
+        verts = mesh_d.vertices
+        step_v = max(1, len(verts) // 8000)
+        sub = verts[::step_v]
+
+        fig_plan = go.Figure()
+        fig_plan.add_trace(go.Scatter(
+            x=sub[:, 0], y=sub[:, 1],
+            mode='markers',
+            marker=dict(size=3, color=sub[:, 2], colorscale='Earth',
+                        showscale=True, colorbar=dict(title="Elev (m)")),
+            name='Diseño',
+            hovertemplate='E: %{x:.1f}<br>N: %{y:.1f}<extra></extra>',
+        ))
+
+        # Draw placed sections on map
+        for sec in st.session_state.clicked_sections:
+            d = _az2dir(sec.azimuth)
+            p1 = sec.origin - d * sec.length / 2
+            p2 = sec.origin + d * sec.length / 2
+            fig_plan.add_trace(go.Scatter(
+                x=[p1[0], sec.origin[0], p2[0]],
+                y=[p1[1], sec.origin[1], p2[1]],
+                mode='lines+markers+text',
+                text=["", sec.name, ""],
+                textposition="top center",
+                line=dict(color='red', width=3),
+                marker=dict(size=[4, 8, 4], color='red'),
+                showlegend=False,
+            ))
+
+        fig_plan.update_layout(
+            xaxis_title='Este (m)', yaxis_title='Norte (m)',
+            yaxis=dict(scaleanchor='x', scaleratio=1),
+            height=600, margin=dict(l=60, r=20, t=30, b=40),
+        )
+
+        # Interactive selection
+        try:
+            event = st.plotly_chart(
+                fig_plan, on_select="rerun",
+                selection_mode=["points"], key="plan_select")
+
+            if event and event.selection and event.selection.points:
+                for pt in event.selection.points:
+                    px, py = pt['x'], pt['y']
+                    already = any(
+                        abs(s.origin[0] - px) < 1 and abs(s.origin[1] - py) < 1
+                        for s in st.session_state.clicked_sections)
+                    if not already:
+                        origin = np.array([px, py])
+                        if az_mode == "Auto (pendiente local)":
+                            az = compute_local_azimuth(mesh_d, origin)
+                        else:
+                            az = manual_az_int
+                        n = len(st.session_state.clicked_sections) + 1
+                        st.session_state.clicked_sections.append(SectionLine(
+                            name=f"S-{n:02d}", origin=origin,
+                            azimuth=az, length=sec_length_int,
+                            sector=sector_int))
+                        st.rerun()
+        except TypeError:
+            st.plotly_chart(fig_plan, key="plan_fallback")
+            st.info("Actualiza Streamlit a >= 1.35 para selección interactiva. "
+                    "Mientras tanto usa la pestaña Manual.")
+
+        # Table + buttons
+        if st.session_state.clicked_sections:
+            st.subheader(f"📍 {len(st.session_state.clicked_sections)} secciones colocadas")
+            sec_data_int = []
+            for s in st.session_state.clicked_sections:
+                sec_data_int.append({
+                    "Nombre": s.name, "Sector": s.sector,
+                    "Origen X": f"{s.origin[0]:.1f}",
+                    "Origen Y": f"{s.origin[1]:.1f}",
+                    "Azimut (°)": f"{s.azimuth:.1f}",
+                    "Longitud (m)": f"{s.length:.1f}",
+                })
+            st.dataframe(sec_data_int, use_container_width=True)
+
+        cols_btn = st.columns(2)
+        if cols_btn[0].button("✅ Aplicar Secciones", type="primary", key="apply_int"):
+            if st.session_state.clicked_sections:
+                st.session_state.sections = list(st.session_state.clicked_sections)
+                st.session_state.step = 3
+                st.success(f"✅ {len(st.session_state.clicked_sections)} secciones aplicadas")
+        if cols_btn[1].button("🗑️ Limpiar", key="clear_int"):
+            st.session_state.clicked_sections = []
+            st.rerun()
+
+    # --- TAB MANUAL ---
     with tab_manual:
         st.markdown("Define cada sección con un punto de origen (X, Y), azimut y longitud.")
         
-        n_sections = st.number_input("Número de secciones a definir", min_value=1, max_value=50, value=5)
-        
+        cols_top = st.columns(2)
+        n_sections = cols_top[0].number_input(
+            "Número de secciones a definir", min_value=1, max_value=50, value=5)
+        auto_az_manual = cols_top[1].checkbox(
+            "Auto-detectar azimut desde diseño", value=False, key="auto_az_manual")
+
         sections_manual = []
         for i in range(n_sections):
             with st.expander(f"Sección S-{i+1:02d}", expanded=(i==0)):
                 cols = st.columns(5)
                 name = cols[0].text_input("Nombre", f"S-{i+1:02d}", key=f"sname_{i}")
                 sector = cols[1].text_input("Sector", "", key=f"ssector_{i}")
-                
+
                 bd = st.session_state.bounds_design
                 cx, cy = bd['center'][0], bd['center'][1]
-                
+
                 cols2 = st.columns(4)
                 ox = cols2[0].number_input("Origen X", value=float(cx), format="%.1f", key=f"sox_{i}")
                 oy = cols2[1].number_input("Origen Y", value=float(cy), format="%.1f", key=f"soy_{i}")
-                az = cols2[2].number_input("Azimut (°)", value=0.0, min_value=0.0, max_value=360.0, key=f"saz_{i}")
+
+                if auto_az_manual:
+                    from core.section_cutter import compute_local_azimuth as _calc_az
+                    az = _calc_az(st.session_state.mesh_design, np.array([ox, oy]))
+                    cols2[2].text_input("Azimut (°)", value=f"{az:.1f}", disabled=True, key=f"saz_{i}")
+                else:
+                    az = cols2[2].number_input("Azimut (°)", value=0.0, min_value=0.0,
+                                              max_value=360.0, key=f"saz_{i}")
+
                 length = cols2[3].number_input("Longitud (m)", value=200.0, min_value=10.0, key=f"slen_{i}")
-                
+
                 sections_manual.append(SectionLine(name=name, origin=np.array([ox, oy]),
                     azimuth=az, length=length, sector=sector))
         
@@ -223,18 +346,28 @@ if st.session_state.step >= 2:
         
         cols2 = st.columns(3)
         n_auto = cols2[0].number_input("N° de secciones", min_value=2, max_value=50, value=5)
-        az_auto = cols2[1].number_input("Azimut de corte (°)", value=0.0, min_value=0.0, max_value=360.0)
-        len_auto = cols2[2].number_input("Longitud de sección (m)", value=200.0, min_value=10.0)
-        sector_auto = st.text_input("Nombre del sector", "Sector Principal")
-        
+        auto_az_auto = st.checkbox("Auto-detectar azimut por sección", value=False, key="auto_az_auto")
+        if not auto_az_auto:
+            az_auto = st.number_input("Azimut de corte (°)", value=0.0, min_value=0.0,
+                                      max_value=360.0, key="az_auto_fixed")
+        len_auto = cols2[1].number_input("Longitud de sección (m)", value=200.0, min_value=10.0)
+        sector_auto = cols2[2].text_input("Sector", "Sector Principal", key="sector_auto_txt")
+
         if st.button("🔄 Generar Secciones Automáticas", type="primary"):
-            from core.section_cutter import generate_sections_along_crest
+            from core.section_cutter import generate_sections_along_crest, compute_local_azimuth as _calc_az2
+            # Generate with azimuth=0 first, then override if auto
             sections_auto = generate_sections_along_crest(
                 st.session_state.mesh_design,
                 np.array([x1, y1]),
                 np.array([x2, y2]),
-                n_auto, az_auto, len_auto, sector_auto
+                n_auto, 0.0, len_auto, sector_auto
             )
+            if auto_az_auto:
+                for sec in sections_auto:
+                    sec.azimuth = _calc_az2(st.session_state.mesh_design, sec.origin)
+            else:
+                for sec in sections_auto:
+                    sec.azimuth = az_auto
             st.session_state.sections = sections_auto
             st.session_state.step = 3
             st.success(f"✅ {len(sections_auto)} secciones generadas")

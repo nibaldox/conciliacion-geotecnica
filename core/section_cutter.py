@@ -97,6 +97,38 @@ def cut_both_surfaces(mesh_design, mesh_topo, section):
     return pd, pt
 
 
+def compute_local_azimuth(mesh, point_xy, radius=50.0):
+    """
+    Compute the steepest descent azimuth at a point on the mesh surface.
+    Fits a plane to nearby vertices and returns the downhill direction.
+    """
+    verts = mesh.vertices
+    dx = verts[:, 0] - point_xy[0]
+    dy = verts[:, 1] - point_xy[1]
+    dists_sq = dx ** 2 + dy ** 2
+
+    mask = dists_sq < radius ** 2
+    if mask.sum() < 10:
+        mask = dists_sq < (radius * 3) ** 2
+        if mask.sum() < 10:
+            return 0.0
+
+    local_verts = verts[mask]
+
+    # Fit plane z = a*x + b*y + c via least squares
+    A = np.column_stack([local_verts[:, 0], local_verts[:, 1],
+                         np.ones(len(local_verts))])
+    z = local_verts[:, 2]
+    coeffs, _, _, _ = np.linalg.lstsq(A, z, rcond=None)
+
+    # Gradient (steepest ascent) = (a, b); descent = (-a, -b)
+    grad_x, grad_y = coeffs[0], coeffs[1]
+
+    # Azimuth from North, clockwise: arctan2(east_component, north_component)
+    azimuth = np.degrees(np.arctan2(-grad_x, -grad_y)) % 360
+    return float(azimuth)
+
+
 def generate_sections_along_crest(mesh, start_point, end_point, n_sections,
                                   section_azimuth, section_length,
                                   sector_name=""):
