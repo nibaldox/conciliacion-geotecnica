@@ -10,6 +10,10 @@ def load_mesh(filepath):
     mesh = trimesh.load(filepath)
     if isinstance(mesh, trimesh.Scene):
         mesh = mesh.dump(concatenate=True)
+    if not hasattr(mesh, 'vertices') or not hasattr(mesh, 'faces'):
+        raise ValueError("El archivo no contiene una malla 3D válida.")
+    if len(mesh.vertices) == 0 or len(mesh.faces) == 0:
+        raise ValueError("La malla está vacía (0 vértices o 0 caras).")
     return mesh
 
 

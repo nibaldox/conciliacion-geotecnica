@@ -42,7 +42,7 @@ def parse_args():
     # Tolerancias
     parser.add_argument("--tol-height", default="1.0,1.5", help="Tolerancia altura '-,+' en m")
     parser.add_argument("--tol-angle", default="5.0,5.0", help="Tolerancia ángulo cara '-,+' en °")
-    parser.add_argument("--tol-berm", default="1.0,2.0", help="Tolerancia berma '-,+' en m")
+    parser.add_argument("--min-berm", type=float, default=6.0, help="Berma mínima (m)")
     parser.add_argument("--tol-ir", default="3.0,2.0", help="Tolerancia inter-rampa '-,+' en °")
     
     # Detección
@@ -86,7 +86,7 @@ def main():
     tolerances = {
         'bench_height': parse_tolerance(args.tol_height),
         'face_angle': parse_tolerance(args.tol_angle),
-        'berm_width': parse_tolerance(args.tol_berm),
+        'berm_width': {'min': args.min_berm},
         'inter_ramp_angle': parse_tolerance(args.tol_ir),
         'overall_angle': {'neg': 2.0, 'pos': 2.0},
     }

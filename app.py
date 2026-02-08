@@ -134,6 +134,7 @@ with col2:
     file_topo = st.file_uploader("Cargar STL Topografía Real", type=["stl", "obj", "ply"], key="topo_file")
 
 if file_design and file_topo:
+    f_design = f_topo = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as f:
             f.write(file_design.read()); f_design = f.name
@@ -145,8 +146,6 @@ if file_design and file_topo:
             st.session_state.mesh_topo = load_mesh(f_topo)
             st.session_state.bounds_design = get_mesh_bounds(st.session_state.mesh_design)
             st.session_state.bounds_topo = get_mesh_bounds(st.session_state.mesh_topo)
-
-        os.unlink(f_design); os.unlink(f_topo)
 
         col1, col2 = st.columns(2)
         with col1:
@@ -161,6 +160,10 @@ if file_design and file_topo:
         st.session_state.step = max(st.session_state.step, 2)
     except Exception as e:
         st.error(f"Error al cargar: {e}")
+    finally:
+        for tmp in (f_design, f_topo):
+            if tmp and os.path.exists(tmp):
+                os.unlink(tmp)
 
 # =====================================================
 # VISUALIZACIÓN 3D Y PLANTA 2D
@@ -327,7 +330,7 @@ if st.session_state.step >= 2:
                 import pandas as pd
                 content = coord_file.read().decode('utf-8')
                 # Try to parse CSV
-                df_coords = pd.read_csv(io.StringIO(content))
+                df_coords = pd.read_csv(io.StringIO(content), nrows=10000)
                 # Accept various column name formats
                 x_col = next((c for c in df_coords.columns
                               if c.strip().upper() in ('X', 'ESTE', 'EAST', 'E')), None)
