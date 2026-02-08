@@ -36,10 +36,10 @@ def extract_parameters(distances, elevations, section_name, sector,
     """
     Extract geotechnical parameters from a 2D profile.
 
-    1. Smooth and resample profile at given resolution
+    1. Resample and lightly smooth profile for segment classification
     2. Compute local angles between consecutive points
     3. Classify segments as face (>face_threshold) or berm (<berm_threshold)
-    4. Extract bench parameters (height, face angle, berm width)
+    4. Find true crest/toe from RAW profile around face boundaries
     5. Calculate inter-ramp and overall angles
     """
     result = ExtractionResult(section_name=section_name, sector=sector)
@@ -59,13 +59,13 @@ def extract_parameters(distances, elevations, section_name, sector,
                         bounds_error=False, fill_value='extrapolate')
     e_resampled = f_interp(d_resampled)
 
-    # Smooth (window ~3 meters)
-    window = max(3, int(3.0 / resolution))
+    # Moderate smooth for robust segment classification (2m window)
+    window = max(3, int(2.0 / resolution))
     if window % 2 == 0:
         window += 1
     e_smooth = uniform_filter1d(e_resampled, size=window)
 
-    # Compute local angles between consecutive points
+    # Compute local angles from smoothed profile (robust classification)
     dd = np.diff(d_resampled)
     de = np.diff(e_smooth)
     angles = np.abs(np.degrees(np.arctan2(np.abs(de), dd)))
@@ -73,6 +73,9 @@ def extract_parameters(distances, elevations, section_name, sector,
     # Classify segments
     is_face = angles > face_threshold
     is_berm = angles < berm_threshold
+
+    # Search window for true crest/toe from RAW profile (2m)
+    search_pts = max(2, int(2.0 / resolution))
 
     # Detect benches: face segments followed by berm segments
     benches = []
@@ -87,13 +90,26 @@ def extract_parameters(distances, elevations, section_name, sector,
                 i += 1
             face_end = i
 
-            crest_idx = face_start
-            toe_idx = min(face_end, len(d_resampled) - 1)
+            # Find TRUE crest from RAW profile: highest point before/at face_start
+            search_begin = max(0, face_start - search_pts)
+            crest_zone = e_resampled[search_begin:face_start + 1]
+            if len(crest_zone) > 0:
+                crest_idx = search_begin + int(np.argmax(crest_zone))
+            else:
+                crest_idx = face_start
+
+            # Find TRUE toe from RAW profile: lowest point at/after face_end
+            toe_limit = min(len(e_resampled), face_end + search_pts)
+            toe_zone = e_resampled[face_end - 1:toe_limit]
+            if len(toe_zone) > 0:
+                toe_idx = (face_end - 1) + int(np.argmin(toe_zone))
+            else:
+                toe_idx = min(face_end, len(d_resampled) - 1)
 
             crest_d = d_resampled[crest_idx]
-            crest_e = e_smooth[crest_idx]
+            crest_e = e_resampled[crest_idx]
             toe_d = d_resampled[toe_idx]
-            toe_e = e_smooth[toe_idx]
+            toe_e = e_resampled[toe_idx]
 
             bench_height = abs(crest_e - toe_e)
             horiz_dist = abs(toe_d - crest_d)
