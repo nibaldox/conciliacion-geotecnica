@@ -1,183 +1,144 @@
-#!/usr/bin/env python3
-"""
-CLI para Conciliación Geotécnica: Diseño vs As-Built
-Uso:
-  python cli.py --design superficie_diseno.stl --topo superficie_topo.stl --config secciones.json
-  python cli.py --design diseno.stl --topo topo.stl --auto --start "1000,2000" --end "1500,2000" --n 10 --azimuth 0
-"""
+"""Command Line Interface for Geotechnical Reconciliation."""
+
 import argparse
-import json
 import sys
+import json
+import os
+import pandas as pd
 import numpy as np
-from pathlib import Path
-from datetime import datetime
 
-sys.path.insert(0, str(Path(__file__).parent))
-from core import (
-    load_mesh, get_mesh_bounds,
-    SectionLine, cut_mesh_with_section,
-    extract_parameters, compare_design_vs_asbuilt, export_results,
+from core.mesh_handler import load_mesh
+from core.section_cutter import (
+    generate_sections_along_crest, generate_perpendicular_sections,
+    cut_both_surfaces, SectionLine
 )
-from core.section_cutter import generate_sections_along_crest
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Conciliación Geotécnica: Diseño vs As-Built")
-    parser.add_argument("--design", required=True, help="Archivo STL/OBJ superficie de diseño")
-    parser.add_argument("--topo", required=True, help="Archivo STL/OBJ superficie topográfica real")
-    parser.add_argument("--output", default="Conciliacion_Resultados.xlsx", help="Archivo Excel de salida")
-    
-    # Secciones desde archivo JSON
-    parser.add_argument("--config", help="Archivo JSON con definición de secciones")
-    
-    # Generación automática de secciones
-    parser.add_argument("--auto", action="store_true", help="Generar secciones automáticamente")
-    parser.add_argument("--start", help="Punto inicio 'X,Y' para generación automática")
-    parser.add_argument("--end", help="Punto fin 'X,Y' para generación automática")
-    parser.add_argument("--n", type=int, default=5, help="Número de secciones")
-    parser.add_argument("--azimuth", type=float, default=0.0, help="Azimut de corte (°)")
-    parser.add_argument("--length", type=float, default=200.0, help="Longitud de secciones (m)")
-    parser.add_argument("--sector", default="General", help="Nombre del sector")
-    
-    # Tolerancias
-    parser.add_argument("--tol-height", default="1.0,1.5", help="Tolerancia altura '-,+' en m")
-    parser.add_argument("--tol-angle", default="5.0,5.0", help="Tolerancia ángulo cara '-,+' en °")
-    parser.add_argument("--min-berm", type=float, default=6.0, help="Berma mínima (m)")
-    parser.add_argument("--tol-ir", default="3.0,2.0", help="Tolerancia inter-rampa '-,+' en °")
-    
-    # Detección
-    parser.add_argument("--face-threshold", type=float, default=40.0, help="Ángulo mínimo cara (°)")
-    parser.add_argument("--berm-threshold", type=float, default=20.0, help="Ángulo máximo berma (°)")
-    parser.add_argument("--resolution", type=float, default=0.5, help="Resolución de perfil (m)")
-    
-    # Info proyecto
-    parser.add_argument("--project", default="", help="Nombre del proyecto")
-    parser.add_argument("--author", default="", help="Elaborado por")
-    
-    return parser.parse_args()
-
-
-def parse_tolerance(tol_str):
-    parts = tol_str.split(",")
-    return {'neg': float(parts[0]), 'pos': float(parts[1])}
-
-
-def load_sections_from_json(filepath):
-    """Carga secciones desde archivo JSON."""
-    with open(filepath) as f:
-        data = json.load(f)
-    
-    sections = []
-    for s in data.get("sections", []):
-        sections.append(SectionLine(
-            name=s["name"],
-            origin=np.array(s["origin"]),
-            azimuth=s["azimuth"],
-            length=s.get("length", 200.0),
-            sector=s.get("sector", ""),
-        ))
-    return sections
-
+from core.param_extractor import extract_parameters, compare_design_vs_asbuilt
+from core.excel_writer import export_results
+from core.report_generator import generate_word_report
 
 def main():
-    args = parse_args()
+    parser = argparse.ArgumentParser(description="Conciliación Geotécnica 3D CLI")
     
-    # Parsear tolerancias
-    tolerances = {
-        'bench_height': parse_tolerance(args.tol_height),
-        'face_angle': parse_tolerance(args.tol_angle),
-        'berm_width': {'min': args.min_berm},
-        'inter_ramp_angle': parse_tolerance(args.tol_ir),
-        'overall_angle': {'neg': 2.0, 'pos': 2.0},
-    }
+    # Inputs
+    parser.add_argument("--design", required=True, help="Path to Design Mesh (STL/DXF/OBJ)")
+    parser.add_argument("--topo", required=True, help="Path to Topo/Scan Mesh (STL/DXF/OBJ)")
+    parser.add_argument("--sections", help="JSON file with section definitions or 'auto'")
+    parser.add_argument("--dxf_poly", help="DXF file with polyline for auto sections")
     
-    # Cargar superficies
-    print(f"📂 Cargando superficie de diseño: {args.design}")
-    mesh_design = load_mesh(args.design)
-    bounds_d = get_mesh_bounds(mesh_design)
-    print(f"   ✅ {bounds_d['n_faces']:,} caras | Z: [{bounds_d['zmin']:.1f}, {bounds_d['zmax']:.1f}]")
+    # Params
+    parser.add_argument("--spacing", type=float, default=20.0, help="Spacing for auto sections")
+    parser.add_argument("--length", type=float, default=150.0, help="Length of sections")
+    parser.add_argument("--azimuth", type=float, help="Fixed azimuth for sections (optional)")
     
-    print(f"📂 Cargando superficie topográfica: {args.topo}")
-    mesh_topo = load_mesh(args.topo)
-    bounds_t = get_mesh_bounds(mesh_topo)
-    print(f"   ✅ {bounds_t['n_faces']:,} caras | Z: [{bounds_t['zmin']:.1f}, {bounds_t['zmax']:.1f}]")
+    # Tolerances
+    parser.add_argument("--tol_h", type=float, default=0.5, help="Height tolerance (+/-)")
+    parser.add_argument("--tol_a", type=float, default=3.0, help="Angle tolerance (+/- deg)")
+    parser.add_argument("--min_berm", type=float, default=8.0, help="Minimum berm width")
     
-    # Definir secciones
-    if args.config:
-        print(f"📋 Cargando secciones desde: {args.config}")
-        sections = load_sections_from_json(args.config)
-    elif args.auto:
-        if not args.start or not args.end:
-            print("❌ Se requiere --start y --end para generación automática")
+    # Output
+    parser.add_argument("--output", default="results", help="Output directory/prefix")
+    parser.add_argument("--report", action="store_true", help="Generate Word report")
+
+    args = parser.parse_args()
+    
+    # 1. Load Meshes
+    print("Loading meshes...")
+    try:
+        mesh_d = load_mesh(args.design)
+        mesh_t = load_mesh(args.topo)
+    except Exception as e:
+        print(f"Error loading meshes: {e}")
+        sys.exit(1)
+        
+    # 2. Define Sections
+    print("Generating sections...")
+    sections = []
+    
+    if args.sections and args.sections.endswith('.json'):
+        with open(args.sections, 'r') as f:
+            data = json.load(f)
+            for s in data:
+                sections.append(SectionLine(
+                    name=s['name'],
+                    origin=np.array(s['origin']),
+                    azimuth=s['azimuth'],
+                    length=s.get('length', args.length),
+                    sector=s.get('sector', "Default")
+                ))
+    elif args.dxf_poly:
+        # Load DXF polyline
+        from core.mesh_handler import load_dxf_polyline
+        pts = load_dxf_polyline(args.dxf_poly)
+        if len(pts) < 2:
+            print("Invalid DXF polyline.")
             sys.exit(1)
-        start = np.array([float(x) for x in args.start.split(",")])
-        end = np.array([float(x) for x in args.end.split(",")])
-        print(f"🔄 Generando {args.n} secciones automáticas...")
-        sections = generate_sections_along_crest(
-            mesh_design, start, end, args.n,
-            args.azimuth, args.length, args.sector
+        
+        sections = generate_perpendicular_sections(
+            pts, args.spacing, args.length, "DXF_Auto", design_mesh=mesh_d
         )
     else:
-        print("❌ Debe especificar --config o --auto para definir secciones")
-        sys.exit(1)
-    
-    print(f"✂️  {len(sections)} secciones definidas")
-    
-    # Procesar secciones
-    params_design = []
-    params_topo = []
-    comparisons = []
-    
-    for i, section in enumerate(sections):
-        print(f"   Procesando {section.name}...", end=" ")
-        
-        pd = cut_mesh_with_section(mesh_design, section)
-        pt = cut_mesh_with_section(mesh_topo, section)
-        
-        if pd is None or pt is None:
-            print("⚠️ Sin intersección")
-            continue
-        
-        ep_d = extract_parameters(pd.distances, pd.elevations,
-            section.name, section.sector, args.resolution,
-            args.face_threshold, args.berm_threshold)
-        ep_t = extract_parameters(pt.distances, pt.elevations,
-            section.name, section.sector, args.resolution,
-            args.face_threshold, args.berm_threshold)
-        
-        params_design.append(ep_d)
-        params_topo.append(ep_t)
-        
-        if ep_d.benches and ep_t.benches:
-            comp = compare_design_vs_asbuilt(ep_d, ep_t, tolerances)
-            comparisons.extend(comp)
-            print(f"✅ {len(ep_d.benches)} bancos diseño, {len(ep_t.benches)} bancos real")
-        else:
-            print(f"⚠️ Bancos: diseño={len(ep_d.benches)}, real={len(ep_t.benches)}")
-    
-    # Resumen
-    if comparisons:
-        n_total = len(comparisons) * 3
-        n_ok = sum(1 for c in comparisons for k in ['height_status','angle_status','berm_status'] if c[k] == "CUMPLE")
-        pct = n_ok / n_total * 100
-        
-        print(f"\n📊 RESUMEN DE CUMPLIMIENTO")
-        print(f"   Bancos evaluados: {len(comparisons)}")
-        print(f"   Evaluaciones totales: {n_total}")
-        print(f"   Cumplimiento global: {pct:.1f}%")
-        
-        # Exportar
-        project_info = {
-            'project': args.project, 'author': args.author,
-            'date': datetime.now().strftime("%d/%m/%Y"),
-        }
-        export_results(comparisons, params_design, params_topo,
-            tolerances, args.output, project_info)
-        print(f"\n💾 Resultados exportados a: {args.output}")
-    else:
-        print("\n⚠️ No se obtuvieron resultados para comparar.")
-        print("   Verifica que las secciones intersecten ambas superficies.")
+        # Auto single line (dummy default)
+        print("No section definition provided. Generating demo sections based on mesh bounds center.")
+        c = mesh_d.centroid
+        p1 = c - np.array([100, 0, 0])
+        p2 = c + np.array([100, 0, 0])
+        sections = generate_sections_along_crest(
+            mesh_d, p1, p2, 5, section_azimuth=0, section_length=args.length
+        )
 
+    print(f"Defined {len(sections)} sections.")
+    
+    # 3. Process
+    print("Processing...")
+    all_comparisons = []
+    params_d_list = []
+    params_t_list = []
+    all_data = []
+    
+    tolerances = {
+        'bench_height': {'neg': args.tol_h, 'pos': args.tol_h},
+        'face_angle': {'neg': args.tol_a, 'pos': args.tol_a},
+        'berm_width': {'min': args.min_berm, 'tol': 0.5} # Fixed tol for berm dev
+    }
+    
+    for sec in sections:
+        res_d, res_t = cut_both_surfaces(mesh_d, mesh_t, sec)
+        
+        if res_d and res_t:
+            pd = extract_parameters(res_d.distances, res_d.elevations, sec.name, sec.sector)
+            pt = extract_parameters(res_t.distances, res_t.elevations, sec.name, sec.sector)
+            
+            params_d_list.append(pd)
+            params_t_list.append(pt)
+            
+            all_data.append({
+                'section_name': sec.name,
+                'params_design': pd,
+                'params_topo': pt,
+                'profile_d': (res_d.distances, res_d.elevations),
+                'profile_t': (res_t.distances, res_t.elevations)
+            })
+            
+            comps = compare_design_vs_asbuilt(pd, pt, tolerances)
+            all_comparisons.extend(comps)
+            
+    # 4. Export
+    if not os.path.exists(args.output):
+        os.makedirs(args.output, exist_ok=True)
+        
+    excel_path = os.path.join(args.output, "conciliacion_results.xlsx")
+    print(f"Exporting Excel to {excel_path}...")
+    export_results(all_comparisons, params_d_list, params_t_list,
+                   tolerances, excel_path, 
+                   {'project': 'CLI Run', 'author': 'Automated'})
+                   
+    if args.report:
+        word_path = os.path.join(args.output, "conciliacion_report.docx")
+        print(f"Exporting Word Report to {word_path}...")
+        generate_word_report(all_comparisons, all_data, word_path,
+                             {'project': 'CLI Run', 'author': 'Automated'})
+
+    print("Done.")
 
 if __name__ == "__main__":
     main()

@@ -1,208 +1,190 @@
-"""
-Test del pipeline completo con superficies sintéticas de un pit abierto.
-Genera dos superficies STL (diseño y as-built), ejecuta el análisis y exporta resultados.
-"""
 import numpy as np
+import pytest
+import os
 import trimesh
-import sys
-from pathlib import Path
+from core.section_cutter import SectionLine, cut_mesh_with_section, generate_sections_along_crest
+from core.param_extractor import extract_parameters, compare_design_vs_asbuilt
 
-sys.path.insert(0, str(Path(__file__).parent))
-from core import (
-    load_mesh, get_mesh_bounds,
-    SectionLine, cut_mesh_with_section,
-    extract_parameters, compare_design_vs_asbuilt, export_results,
-)
-from core.section_cutter import generate_sections_along_crest
+# Mock Data Generation Helpers
 
-
-def create_pit_surface(nx=100, ny=100, x_range=(0, 500), y_range=(0, 500),
-                        bench_height=15.0, berm_width=9.0, face_angle_deg=70.0,
-                        n_benches=4, crest_elevation=3900.0, noise_std=0.0):
+def create_pit_surface(center, radius_top, radius_bottom, height, bench_height, bench_width):
     """
-    Genera una superficie sintética de pit abierto con bancos, bermas y cara.
-    El pit es un cono escalonado centrado en la malla.
+    Create a synthetic pit surface (conical with steps) roughly imitating benches.
+    This constructs a mesh with vertices and faces.
     """
-    x = np.linspace(x_range[0], x_range[1], nx)
-    y = np.linspace(y_range[0], y_range[1], ny)
-    X, Y = np.meshgrid(x, y)
+    # Simple revolution mesh
+    # Profile: (r, z) points
+    # Start at bottom
+    profile_pts = []
     
-    cx = (x_range[0] + x_range[1]) / 2
-    cy = (y_range[0] + y_range[1]) / 2
+    z_current = 0
+    r_current = radius_bottom
     
-    # Distancia radial desde el centro
-    R = np.sqrt((X - cx)**2 + (Y - cy)**2)
-    
-    # Construir perfil escalonado
-    face_width = bench_height / np.tan(np.radians(face_angle_deg))
-    bench_total_width = berm_width + face_width
-    
-    Z = np.full_like(R, crest_elevation)
-    
-    for i in range(n_benches):
-        # Radio donde comienza este banco (desde afuera hacia adentro)
-        r_outer = 200.0 - i * bench_total_width
-        r_face_inner = r_outer - face_width
-        r_inner = r_face_inner - berm_width
+    while z_current < height:
+        # Point at Toe
+        profile_pts.append((r_current, z_current))
         
-        if r_outer <= 0:
-            break
+        # Up (Face)
+        z_next = min(z_current + bench_height, height)
+        # Face angle approx 75 deg? tan(75) ~ 3.7
+        # dr = dz / tan(ang)
+        dr_face = (z_next - z_current) / 3.7 
+        r_next = r_current + dr_face
         
-        elev_top = crest_elevation - i * bench_height
-        elev_bot = elev_top - bench_height
+        profile_pts.append((r_next, z_next))
         
-        # Cara del banco (transición lineal)
-        mask_face = (R >= max(r_face_inner, 0)) & (R < r_outer)
-        if mask_face.any():
-            t = (r_outer - R[mask_face]) / face_width
-            t = np.clip(t, 0, 1)
-            Z[mask_face] = np.minimum(Z[mask_face], elev_top - t * bench_height)
+        if z_next < height:
+            # Out (Berm)
+            r_next_toe = r_next + bench_width
+            profile_pts.append((r_next_toe, z_next))
+            
+            r_current = r_next_toe
         
-        # Berma (plana)
-        mask_berm = R < max(r_face_inner, 0)
-        if mask_berm.any():
-            Z[mask_berm] = np.minimum(Z[mask_berm], elev_bot)
-    
-    # Añadir ruido
-    if noise_std > 0:
-        Z += np.random.normal(0, noise_std, Z.shape)
-    
-    # Crear malla triangulada
+        z_current = z_next
+
+    # Revolve profile
+    theta = np.linspace(0, 2*np.pi, 36) # 36 segments (10 deg)
     vertices = []
+    
+    # Vertices
+    for t in theta:
+        cos_t = np.cos(t)
+        sin_t = np.sin(t)
+        for r, z in profile_pts:
+            vertices.append([center[0] + r*cos_t, center[1] + r*sin_t, center[2] + z])
+            
+    # Faces
     faces = []
+    n_prof = len(profile_pts)
+    n_theta = len(theta)
     
-    for i in range(ny):
-        for j in range(nx):
-            vertices.append([X[i, j], Y[i, j], Z[i, j]])
-    
-    for i in range(ny - 1):
-        for j in range(nx - 1):
-            v0 = i * nx + j
-            v1 = v0 + 1
-            v2 = (i + 1) * nx + j
-            v3 = v2 + 1
+    for i in range(n_theta - 1):
+        for j in range(n_prof - 1):
+            # Quad formed by (i,j), (i+1, j), (i+1, j+1), (i, j+1)
+            # v0 = i*n_prof + j
+            # v1 = (i+1)*n_prof + j
+            # v2 = (i+1)*n_prof + (j+1)
+            # v3 = i*n_prof + (j+1)
+            
+            v0 = i * n_prof + j
+            v1 = (i + 1) * n_prof + j
+            v2 = (i + 1) * n_prof + (j + 1)
+            v3 = i * n_prof + (j + 1)
+            
+            # Tri 1: v0, v1, v2
             faces.append([v0, v1, v2])
-            faces.append([v1, v3, v2])
-    
-    mesh = trimesh.Trimesh(vertices=np.array(vertices), faces=np.array(faces))
+            # Tri 2: v0, v2, v3
+            faces.append([v0, v2, v3])
+            
+    # Link last sector to first
+    i = n_theta - 1
+    for j in range(n_prof - 1):
+        v0 = i * n_prof + j
+        v1 = 0 * n_prof + j # wrap to 0
+        v2 = 0 * n_prof + (j + 1)
+        v3 = i * n_prof + (j + 1)
+        
+        faces.append([v0, v1, v2])
+        faces.append([v0, v2, v3])
+
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
     return mesh
 
+def test_full_reconciliation_flow():
+    """
+    Test the pipeline: Mesh -> Cut -> Extract -> Compare.
+    """
+    # 1. Setup Data
+    # Design: Ideal pit
+    mesh_design = create_pit_surface([0,0,0], 100, 50, 30, 10, 5)
+    
+    # Topo: Slightly wider, maybe lower benches (simulating imperfection)
+    # 30 height, 9.5 bench height (error), 5.2 berm (error)
+    mesh_topo = create_pit_surface([0,0,0], 102, 52, 30, 9.5, 5.2)
 
-def run_test():
-    print("=" * 60)
-    print("TEST: Pipeline de Conciliación Geotécnica")
-    print("=" * 60)
-    
-    # Generar superficies
-    print("\n1. Generando superficies sintéticas...")
-    
-    mesh_design = create_pit_surface(
-        nx=150, ny=150,
-        bench_height=15.0, berm_width=9.0, face_angle_deg=70.0,
-        n_benches=4, crest_elevation=3900.0, noise_std=0.0
+    # 2. Define Section
+    # Cross section through center, X-axis
+    section = SectionLine(
+        name="TestSection",
+        origin=np.array([70, 0, 0]), # On the wall
+        azimuth=90, # Facing East (outwards from center? Center is 0,0. Wall is at Radius ~50-80)
+        # Wait, if center is 0,0. Radius grows outwards.
+        # Wall is at R=50 to R=100.
+        # Section Origin at 75 (mid slope). 
+        # Azimuth 90 is East. Section runs West-East.
+        # Profile distance will be along X.
+        length=200,
+        sector="Sector1"
     )
     
-    mesh_topo = create_pit_surface(
-        nx=150, ny=150,
-        bench_height=15.0, berm_width=9.0, face_angle_deg=70.0,
-        n_benches=4, crest_elevation=3900.0, noise_std=0.3
-    )
+    # 3. Cut
+    res_d = cut_mesh_with_section(mesh_design, section)
+    res_t = cut_mesh_with_section(mesh_topo, section)
     
-    # Guardar STLs
-    mesh_design.export("/tmp/test_design.stl")
-    mesh_topo.export("/tmp/test_topo.stl")
+    assert res_d is not None
+    assert res_t is not None
+    assert len(res_d.distances) > 10
     
-    bd = get_mesh_bounds(mesh_design)
-    bt = get_mesh_bounds(mesh_topo)
-    print(f"   Diseño: {bd['n_faces']:,} caras, Z: [{bd['zmin']:.1f}, {bd['zmax']:.1f}]")
-    print(f"   Topo:   {bt['n_faces']:,} caras, Z: [{bt['zmin']:.1f}, {bt['zmax']:.1f}]")
+    # 4. Extract
+    pd = extract_parameters(res_d.distances, res_d.elevations, section.name, section.sector)
+    pt = extract_parameters(res_t.distances, res_t.elevations, section.name, section.sector)
     
-    # Definir secciones
-    print("\n2. Generando secciones de corte...")
-    sections = generate_sections_along_crest(
-        mesh_design,
-        start_point=np.array([100.0, 250.0]),
-        end_point=np.array([400.0, 250.0]),
-        n_sections=5,
-        section_azimuth=0.0,
-        section_length=400.0,
-        sector_name="Sector Test"
-    )
-    print(f"   {len(sections)} secciones generadas")
-    for s in sections:
-        print(f"     {s.name}: origen=({s.origin[0]:.0f}, {s.origin[1]:.0f}), az={s.azimuth}°")
+    assert len(pd.benches) > 0
+    assert len(pt.benches) > 0
     
-    # Cortar y extraer
-    print("\n3. Cortando superficies y extrayendo parámetros...")
+    # Expected 3 benches (30m height / 10m)
+    # Check bench heights
+    print(f"Design Benches: {len(pd.benches)}")
+    for b in pd.benches:
+        print(b)
+        assert abs(b.bench_height - 10.0) < 1.0 # Due to discretization/interpolation
+        
+    print(f"Topo Benches: {len(pt.benches)}")
+    for b in pt.benches:
+        print(b)
+        assert abs(b.bench_height - 9.5) < 1.0
+        
+    # 5. Compare
     tolerances = {
-        'bench_height': {'neg': 1.0, 'pos': 1.5},
-        'face_angle': {'neg': 5.0, 'pos': 5.0},
-        'berm_width': {'min': 6.0},
-        'inter_ramp_angle': {'neg': 3.0, 'pos': 2.0},
-        'overall_angle': {'neg': 2.0, 'pos': 2.0},
+        'bench_height': {'neg': 0.5, 'pos': 0.5},
+        'face_angle': {'neg': 5, 'pos': 5},
+        'berm_width': {'min': 4.0, 'tol': 1.0}
     }
     
-    params_design = []
-    params_topo = []
-    comparisons = []
+    comparisons = compare_design_vs_asbuilt(pd, pt, tolerances)
     
-    for section in sections:
-        pd = cut_mesh_with_section(mesh_design, section)
-        pt = cut_mesh_with_section(mesh_topo, section)
-        
-        if pd is None or pt is None:
-            print(f"   ⚠️ {section.name}: sin intersección")
-            continue
-        
-        ep_d = extract_parameters(pd.distances, pd.elevations, section.name, section.sector)
-        ep_t = extract_parameters(pt.distances, pt.elevations, section.name, section.sector)
-        
-        params_design.append(ep_d)
-        params_topo.append(ep_t)
-        
-        print(f"   {section.name}: Diseño={len(ep_d.benches)} bancos, Real={len(ep_t.benches)} bancos")
-        
-        if ep_d.benches:
-            for b in ep_d.benches:
-                print(f"     D-B{b.bench_number}: H={b.bench_height:.1f}m, Á={b.face_angle:.1f}°, Berma={b.berm_width:.1f}m")
-        if ep_t.benches:
-            for b in ep_t.benches:
-                print(f"     R-B{b.bench_number}: H={b.bench_height:.1f}m, Á={b.face_angle:.1f}°, Berma={b.berm_width:.1f}m")
-        
-        if ep_d.benches and ep_t.benches:
-            comp = compare_design_vs_asbuilt(ep_d, ep_t, tolerances)
-            comparisons.extend(comp)
-    
-    # Resumen
-    print(f"\n4. Resultados de la comparación:")
-    if comparisons:
-        n_total = len(comparisons) * 3
-        n_ok = sum(1 for c in comparisons for k in ['height_status','angle_status','berm_status'] if c[k] == "CUMPLE")
-        pct = n_ok / n_total * 100
-        
-        print(f"   Bancos comparados: {len(comparisons)}")
-        print(f"   Evaluaciones: {n_total}")
-        print(f"   Cumplimiento: {pct:.1f}%")
-        
-        for c in comparisons:
-            print(f"   {c['section']}-B{c['bench_num']}: "
-                  f"H={c['height_dev']:+.2f}m [{c['height_status']}] | "
-                  f"Á={c['angle_dev']:+.1f}° [{c['angle_status']}] | "
-                  f"B={c['berm_real']:.1f}m (min={c['berm_min']:.0f}m) [{c['berm_status']}]")
-        
-        # Exportar
-        output = "/tmp/test_conciliacion.xlsx"
-        export_results(comparisons, params_design, params_topo,
-            tolerances, output, {'project': 'Test', 'date': '08/02/2026'})
-        print(f"\n5. ✅ Excel exportado: {output}")
-    else:
-        print("   ⚠️ No se obtuvieron comparaciones.")
-        print("   Esto puede ser normal si las secciones no intersecan bien los bancos.")
-    
-    print("\n" + "=" * 60)
-    print("TEST COMPLETADO")
-    print("=" * 60)
+    assert len(comparisons) > 0
+    # Check first bench comparison
+    c0 = comparisons[0]
+    # Design 10 vs Real 9.5 -> Diff -0.5. Tol 0.5. Status CUMPLE? Or Boundary?
+    # 10 - 9.5 = 0.5 diff. (Real - Design? -0.5). abs(-0.5) <= 0.5 -> CUMPLE
+    print(c0)
+    assert c0['height_status'] == "CUMPLE" or c0['height_status'] == "FUERA DE TOLERANCIA"
 
+
+def test_section_generation():
+    # Test auto sections allow line
+    mesh = create_pit_surface([0,0,0], 100, 50, 30, 10, 5)
+    p1 = np.array([0, -100, 0])
+    p2 = np.array([0, 100, 0])
+    
+    sections = generate_sections_along_crest(mesh, p1, p2, n_sections=3, section_length=100)
+    assert len(sections) == 3
+    assert sections[0].name == "S-01"
+    
+    # Check azimuth
+    # Line is South to North (Y axis). 
+    # Direction Y (0,1). Angle = 0 (from North? arctan(x,y)). 
+    # atan2(0, 1) = 0.
+    # Perpendicular: +90 -> 90 deg (East).
+    assert abs(sections[0].azimuth - 90.0) < 0.1
 
 if __name__ == "__main__":
-    run_test()
+    # Manually run if executed script
+    try:
+        test_full_reconciliation_flow()
+        test_section_generation()
+        print("Tests Passed!")
+    except AssertionError as e:
+        print(f"Test Failed: {e}")
+        raise

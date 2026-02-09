@@ -1,8 +1,14 @@
 __pycache__/
 *.pyc
-*.pyo
-.env
+.DS_Store
 .venv/
+env/
 *.stl
+*.dxf
+*.obj
+*.ply
 *.xlsx
-!ejemplo_secciones.json
+*.docx
+*.zip
+.idea/
+.vscode/
