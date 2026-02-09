@@ -97,12 +97,20 @@ def cut_both_surfaces(mesh_design, mesh_topo, section):
     return pd, pt
 
 
-def compute_local_azimuth(mesh, point_xy, radius=50.0):
+def compute_local_azimuth(design_mesh, point_xy, radius=50.0):
     """
-    Compute the steepest descent azimuth at a point on the mesh surface.
+    Compute the steepest descent azimuth at a point on the DESIGN mesh surface.
     Fits a plane to nearby vertices and returns the downhill direction.
+    
+    Args:
+        design_mesh: Trimesh object representing the DESIGN surface.
+        point_xy: (x, y) coordinates of the point.
+        radius: Search radius for vertices.
+
+    Returns:
+        float: Azimuth in degrees (0=N, 90=E). Returns 0.0 if not enough neighbors.
     """
-    verts = mesh.vertices
+    verts = design_mesh.vertices
     dx = verts[:, 0] - point_xy[0]
     dy = verts[:, 1] - point_xy[1]
     dists_sq = dx ** 2 + dy ** 2
@@ -111,6 +119,7 @@ def compute_local_azimuth(mesh, point_xy, radius=50.0):
     if mask.sum() < 10:
         mask = dists_sq < (radius * 3) ** 2
         if mask.sum() < 10:
+            # Fallback: cannot determine slope, return 0.0 (North)
             return 0.0
 
     local_verts = verts[mask]
@@ -119,28 +128,48 @@ def compute_local_azimuth(mesh, point_xy, radius=50.0):
     A = np.column_stack([local_verts[:, 0], local_verts[:, 1],
                          np.ones(len(local_verts))])
     z = local_verts[:, 2]
+    # Use lstsq with valid rcond
     coeffs, _, _, _ = np.linalg.lstsq(A, z, rcond=None)
 
     # Gradient (steepest ascent) = (a, b); descent = (-a, -b)
     grad_x, grad_y = coeffs[0], coeffs[1]
+    
+    # If gradient is flat (zero), return 0.0
+    if abs(grad_x) < 1e-6 and abs(grad_y) < 1e-6:
+        return 0.0
 
     # Azimuth from North, clockwise: arctan2(east_component, north_component)
+    # North component (Y) is -grad_y (descent)
+    # East component (X) is -grad_x (descent)
     azimuth = np.degrees(np.arctan2(-grad_x, -grad_y)) % 360
     return float(azimuth)
 
 
 def generate_sections_along_crest(mesh, start_point, end_point, n_sections,
-                                  section_azimuth, section_length,
+                                  section_azimuth=None, section_length=200.0,
                                   sector_name=""):
-    """Generate evenly spaced sections along a line (e.g., pit crest)."""
+    """
+    Generate evenly spaced sections along a line (e.g., pit crest).
+    If section_azimuth is None, computes azimuth perpendicular to the line (Right Hand Rule).
+    """
     sections = []
+    
+    computed_az = section_azimuth
+    if computed_az is None:
+        # Vector from start to end
+        diff = end_point - start_point
+        # Azimuth of the line
+        line_az = np.degrees(np.arctan2(diff[0], diff[1])) % 360
+        # Perpendicular (Right side? or Left? Let's use Right +90)
+        computed_az = (line_az + 90) % 360
+        
     for i in range(n_sections):
         t = i / (n_sections - 1) if n_sections > 1 else 0.5
         origin = start_point + t * (end_point - start_point)
         sections.append(SectionLine(
             name=f"S-{i+1:02d}",
             origin=origin,
-            azimuth=section_azimuth,
+            azimuth=computed_az,
             length=section_length,
             sector=sector_name,
         ))
@@ -148,7 +177,7 @@ def generate_sections_along_crest(mesh, start_point, end_point, n_sections,
 
 
 def generate_perpendicular_sections(points, spacing, section_length,
-                                    sector_name="", auto_azimuth_mesh=None):
+                                    sector_name="", design_mesh=None):
     """
     Generate sections perpendicular to a polyline at specified spacing.
 
@@ -157,8 +186,8 @@ def generate_perpendicular_sections(points, spacing, section_length,
         spacing: Distance between sections in meters
         section_length: Length of each section in meters
         sector_name: Sector name for labeling
-        auto_azimuth_mesh: If provided, compute azimuth from mesh slope
-                           instead of line perpendicular
+        design_mesh: If provided, compute azimuth from this mesh's slope
+                     instead of line perpendicular. MUST be the DESIGN mesh.
     Returns:
         List of SectionLine objects
     """
@@ -192,8 +221,9 @@ def generate_perpendicular_sections(points, spacing, section_length,
              if seg_lengths[seg_idx] > 0 else 0)
         origin = points[seg_idx] + t * diffs[seg_idx]
 
-        if auto_azimuth_mesh is not None:
-            az = compute_local_azimuth(auto_azimuth_mesh, origin)
+        if design_mesh is not None:
+            # Enforce using the provided design mesh for azimuth
+            az = compute_local_azimuth(design_mesh, origin)
         else:
             # Perpendicular to the polyline tangent
             tangent = diffs[seg_idx]
